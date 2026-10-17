@@ -1,0 +1,1243 @@
+# Working in this project
+
+A TypeScript monorepo built on ports and adapters, with a streaming UI on RxJS.
+The rules below are enforced by checks, not by convention.
+
+## Commands
+
+```bash
+pnpm dev          # the React client on the in-browser simulator (no server)
+pnpm dev:fs       # the server and the client together
+pnpm gate:fast    # architecture gates, React checks, lint, typecheck: seconds, for while you work
+pnpm gate:full    # gate:fast, then tests and the build: what CI runs
+pnpm gate:full:quiet   # the same commands and verdict, printing only the stage that failed
+pnpm test
+```
+
+Run `pnpm gate:full` before you say work is finished. A red gate means the
+work is not finished, and `gate:fast` alone does not show that it is: it runs
+no test. The stop hook runs `gate:full` for you whenever a file has changed
+since it last passed.
+
+`pnpm gate:full:quiet` (and `gate:fast:quiet`) runs the same commands in the
+same order and exits with the same code. It prints one line for each stage
+that passed, any `SKIP` line that stage printed, and the whole output of the
+stage that failed. Run the quiet form
+when you are the one reading the output: the loud form prints every passing
+test and every cached task. Skip it when a person asked to see the full
+output; CI runs the loud form.
+
+Some sandboxes do not let a process listen on a port; Codex's default one does
+not. There the tests that open a real port (the files named `*.port.test.ts`)
+are left out, and the run prints a `SKIP` line that says so. That is the
+sandbox, not your change: say in your report that those tests were not run
+where you are. The stop hook runs `gate:full` outside the sandbox, and CI
+never skips them.
+
+## The layers
+
+Dependencies point inward only. `architecture.config.mts` is the declaration
+the gates read; a package that is not listed there fails.
+
+| Package | Role | Holds | May import |
+|---|---|---|---|
+| `packages/domain` | domain | Entities, use cases, port interfaces, simulators | nothing (runtime: `rxjs` only) |
+| `packages/shared` | shared | The wire protocol | domain |
+| `packages/client-core` | core | Adapters, presenters, state machines, the composition of the app | domain, shared |
+| `packages/react-bindings` | bindings | The view model: the only place RxJS meets React | core, domain |
+| `packages/client-react` | client | `src/app` (composition root) and `src/ui` (dumb components) | bindings, core, domain |
+| `packages/server` | server | The WebSocket server | domain, shared |
+| `packages/integration` | integration | Tests that run a client adapter against the real server. Tests only | every package above; nothing imports it |
+
+## Where a thing goes
+
+- **It needs the outside world** (network, storage, clock): declare a port in
+  `packages/domain/src/ports`, in domain words. Write a contract test beside it
+  in `__contracts__`. Implement it as a simulator in the domain and as a real
+  adapter in `client-core/src/adapters`, and run the contract against both.
+- **It is application behaviour** (what data exists, what happens on an intent,
+  anything on a timer): a presenter or a state machine in `client-core`.
+- **It turns the wire format into domain terms**: the adapter. Nothing past an
+  adapter sees a wire message.
+- **It reads configuration or picks an adapter**: the composition root,
+  `client-react/src/app`. Nowhere else.
+- **It checks that the client and the server agree**: a test in
+  `packages/integration`, the only package that may import both. Each side's
+  own tests stay where they are; this is for what neither can see alone.
+- **It is drawn on screen**: a component in `client-react/src/ui`, reading from
+  the view model. No RxJS, storage, `fetch`, environment or timers there.
+- **It is a new package**: list it in `architecture.config.mts` with its role,
+  and give it a `typecheck` and a `test` script. One that holds only types
+  also says `typesOnly: true`.
+
+Four rules about imports:
+
+- A presenter or a state machine takes its port as an argument. It never
+  imports from an `adapters` folder.
+- No Node built-in (`node:fs`, `node:path`) outside `packages/server`, except
+  in tests: everything else runs in the browser.
+- `react` and `react-dom` are imported only in `react-bindings` and
+  `client-react`; `ws` only in `server`.
+- What is written for tests (a `testing/` folder, a `*.page.tsx`, a test) is
+  imported only by tests.
+
+The price list is a worked example of every one of these. Copy its shape:
+
+| Pattern | File |
+|---|---|
+| Port | `packages/domain/src/ports/pricePort.ts` |
+| Contract test | `packages/domain/src/ports/__contracts__/PricePortContract.ts` |
+| Simulator | `packages/domain/src/simulators/priceSimulator.ts` |
+| Use case | `packages/domain/src/useCases/trackMovement.ts` |
+| Real adapter | `packages/client-core/src/adapters/wsPrice.ts` |
+| Presenter (shared state, timers) | `packages/client-core/src/presenters/pricesPresenter.ts` |
+| State machine (per-component state) | `packages/client-core/src/machines/selectionMachine.ts` |
+| View model | `packages/react-bindings/src/createViewModel.ts` |
+| Composition root | `packages/client-react/src/app/startApp.tsx` |
+| Client adapter against the real server | `packages/integration/src/priceOverWebSocket.port.test.ts` |
+| Dumb component | `packages/client-react/src/ui/PriceList.tsx` |
+| Page object and its test | `packages/client-react/src/ui/PriceList.page.tsx`, `PriceList.test.tsx` |
+
+## Tests
+
+- Anything on a timer is tested on fake timers, advanced by the exact interval.
+  A test never sleeps.
+- A UI test talks to a page object. Only the page object touches the testing
+  library.
+- A test id is a constant in `packages/client-react/src/ui/testids.ts`, used
+  by the component and by the page object. Never a string literal.
+- A test that needs the whole application asks `createAppHarness`, in
+  `packages/client-core/src/testing/appHarness.ts`. Only that file calls
+  `createApp`.
+- A port's contract imports the port, the entities and the test runner. Never
+  a simulator or an adapter: each one's test passes itself in.
+- A test that opens a real port is named `*.port.test.ts`, so it can be left
+  out, and said to be left out, where a port cannot be opened.
+- A fixture factory is named `create…`.
+- Tests come first in a test file; helpers go below them.
+
+## TypeScript only
+
+No JavaScript source files. Scripts and tool configs are `.mts`, which Node runs
+directly. A file a tool can only load as JavaScript is listed in
+`architecture.config.mts` under `javascriptAllowed`, with the reason.
+
+## Node
+
+The oldest Node this runs on is declared once, as `devEngines.runtime` in the
+root `package.json`. Never add `engines.node` to any `package.json`: a host's
+build (`vercel build`) reads it and refuses a range above the Node it offers,
+so the deploy fails with every check green. The `node-floor` gate holds both.
+
+pnpm is named once, as `packageManager` in the root `package.json`: an exact
+version, then `+sha512.` and the hash of that release. Corepack checks the
+download against it. To move to another pnpm run
+`node tools/arch/ci/pin-package-manager.mts pnpm@<version> --write`, then
+`pnpm install`. Never type or copy the hash by hand, and never delete it to
+get past the `package-manager` gate.
+
+## How code is written
+
+`pnpm lint` enforces these. `pnpm lint --fix` repairs the ones marked (fix).
+
+- A named function is a `function` declaration, never a `const` holding an
+  arrow. Helpers go below the function that uses them.
+- An arrow (a callback, a member of an object) has a block body and a
+  `return`. (fix)
+- A blank line before and after a function and a block that spans lines,
+  between two declarations that span lines, and between the members of a
+  class. (fix)
+- An object type has a name. No `{ … }` type on a parameter, a return type, a
+  variable, a class property, a cast or a type argument: declare an
+  `interface` and use it.
+- One import statement per module, with an inline `type` on each type:
+  `import { type Price, read } from "./price.ts"`. A statement that names only
+  types stays `import type`. (fix)
+- No CommonJS: no `require`, `module.exports`, `__dirname` or `__filename`,
+  and no `.cts` file. Use `import` and `import.meta.dirname`.
+- One class in a file, and the file has its name.
+- In a component, take the hooks out of the view model by name:
+  `const { usePrices } = useViewModel()`. Never keep the bundle in a variable
+  or call through it.
+- A component follows React's rules: a hook is called at the top level, an
+  effect lists what it reads, and nothing reads a ref or sets state while
+  rendering.
+- No `style={{ … }}` in a component: styling goes in a stylesheet, by class.
+- `packages/react-bindings` uses no `useMemo`, `useCallback` or `memo`. Logic
+  that needs one belongs in the core.
+- `packages/client-react` uses none of the three either, for another reason:
+  the React Compiler memoizes at build time. Write the plain value, and a
+  function declaration for a callback.
+
+## The React Compiler
+
+The client's build runs the React Compiler
+(`packages/client-react/vite.config.ts`). It skips a function it cannot
+compile and says nothing, so two checks in `gate:fast` hold it:
+
+- `pnpm check:react-policies` fails when `reactCompiler` in
+  `architecture.config.mts` and the build disagree, and when a package that
+  imports React is not under the lint rules for its role.
+- `pnpm check:compiler` compiles each function listed under `compilerTracked`
+  in `architecture.config.mts` and fails when one is no longer memoized.
+
+What no check decides:
+
+- **A component that reads the view model is not compiled.** Its hooks come
+  out of a value (`const { usePrices } = useViewModel()`), and the compiler
+  skips such a function. Keep that component thin: it reads, and hands plain
+  props to components that take only props. Those are compiled.
+  `packages/client-react/src/ui/PriceList.tsx` reads, and `PriceRow.tsx`
+  beside it takes only props.
+- **When to add an entry to `compilerTracked`.** When a component depends on
+  the compiler to keep something stable or cheap: a costly derived value, a
+  callback a child compares. Skip it for a component whose render is cheap
+  anyway.
+- **When the compiler cannot do it** (an identity a library needs to stay the
+  same, in a function the compiler skips): say so and ask. Do not switch the
+  lint rule off to add a `useMemo`.
+
+## Imports inside a package
+
+An import of a file in the same package is relative and climbs one folder at
+most, as in `../entities/price.ts`. Anything deeper is written from the
+package's `src` with the `#/` alias: `#/entities/price.ts`. Every package
+declares it (`"imports": { "#/*": "./src/*" }` in its `package.json`), and
+Node, Vite, Vitest and `tsc` all read it from there. A new package declares it
+too.
+
+Skip it in a `*.config.ts` file that reaches `tools/`: the alias cannot point
+outside its package. The gates follow an alias to the file it names, so a
+forbidden import is still found. The `format-lint` add-on fails a deeper
+relative import; without it this is a convention.
+
+## Adding a check
+
+Every check in this project was put here by an installer, and
+`tools/installed.json` records each file it wrote. So a new check, or a newer
+copy of the kit or of an add-on, comes through that installer too: the
+`extending-a-project` skill of the plugin this project was made with says how
+to run it, and run with no arguments it lists the add-ons. Look there before
+you write a workflow, a lint config or a test package for a check. A file the
+installer did not write is one it cannot update, and it will not overwrite a
+file you have edited.
+
+## Reviewing a change
+
+A review in this project does two things first, whoever or whatever does it:
+
+1. Runs `pnpm gate:fast` and shows its output. Not run is not passed.
+2. Answers the seven questions in `tools/arch/docs/review.md`, each with its
+   evidence as `file:line` and a verdict, including the ones that pass.
+
+Anything else a review finds (robustness, security, performance) comes after
+those, never in place of them.
+
+## When a gate fails
+
+Its message says what is wrong and where the code belongs. Fix the code. If you
+believe a finding is wrong, or it is outside what you were asked to do, say so;
+do not work around the gate or edit the rules to make it pass.
+
+<!-- BEGIN:turborepo-agent-rules -->
+
+# This is NOT the Turborepo you know
+
+Turborepo configuration, task behavior, and CLI commands can vary between installed versions and may differ from your training data. Resolve the `turbo` package from this file's directory or relevant workspace; in monorepos, it may not be visible from the repository root. For example, run `node -p "require.resolve('turbo/package.json')"` from a workspace that depends on `turbo`.
+
+Read `docs/README.md` inside that installed package first, then read the relevant pages from its `docs/` directory before changing Turborepo configuration or commands. Heed deprecation notices. These bundled docs match the installed package version and are available without network access.
+
+This block is written and re-added by `turbo` before repository-scoped commands when an AI agent is detected. In the Turborepo source repository, its template is defined in `crates/turborepo-cli/src/cli/agent_guidance.rs`. Removing the managed block while updates are enabled means a later qualifying invocation will add it again. Set `"agentGuidance": false` in the root `turbo.json` or `turbo.jsonc` to opt out; this does not remove an existing block. Keep the block committed with your work to avoid an uncommitted change on the next agent invocation.
+<!-- END:turborepo-agent-rules -->
+
+<!-- add-on: agent-workflow -->
+## Agent workflow
+
+How a change leaves this machine. A hook refuses a shell command that joins
+an outward step to anything else; this section is what the hook cannot
+decide: when the outward steps run.
+
+The rules serve three aims, in this order when they pull apart:
+
+1. **Main is never red.** A red main stops every session at once.
+2. **Many sessions work on the project at the same time.** None waits for
+   another, and none edits what another is editing.
+3. **A green change is on main within minutes.** Nothing waits for a person
+   who was not asked to review it.
+
+```bash
+pnpm worktree <name> [--ready]     # a worktree beside the project, on worktree-<name>, cut from origin's main
+pnpm worktree:audit [part of a name]   # which worktrees are finished, and which hold work; it only reads
+pnpm changelog weeks               # the weeks CHANGELOG.md has no entry for
+pnpm changelog prs <week>          # what was merged in a week (reads GitHub)
+pnpm changelog check <week>        # every merged pull request cited, every citation defined
+pnpm agent-workflow:check          # the hook works and is registered in each host's settings
+```
+
+### An outward step is a call of its own
+
+An outward step sends something off this machine or changes shared state:
+`git push`, `gh pr create`, `merge`, `edit`, `comment` or `close`,
+`gh workflow run`, `gh run rerun` or `cancel`, a `gh api` call that writes,
+and `gh issue`, `gh release` and `gh repo` writes. Everything else is local:
+`git add`, `git commit`, `git fetch`, tests, `gh pr view`, `gh run list`.
+
+Run each outward step as its own tool call. A pipe into a filter
+(`git push 2>&1 | tail -2`) is still one step. Joining it to anything with
+`&&`, `;`, `||` or a new line is refused. When the hook refuses a command,
+split it. Do not reword it to get past the hook: the point is the order of
+the work, not the shape of the command.
+
+### Put the outward steps at the two ends
+
+Plan a piece of work in three parts:
+
+1. **Start:** anything outward the work depends on, such as a workflow run
+   whose result you need later. Often nothing.
+2. **Local work:** the worktree, edits, tests, gates, commits. Nothing here
+   asks for permission. For several pull requests, do the local work of all
+   of them here.
+3. **End:** push, open the pull request, wait for green, merge, clean up,
+   watch main. One call each, one after the other. The sections from "Wait
+   for green on your commit" on say how.
+
+A person may be away while you work, and each permission prompt stops the
+session until they return. Prompts at the two ends cost two waits; prompts
+spread through the work cost one wait each.
+
+- Waiting for checks is not a reason to start local work that will need a
+  second push. Use the wait to read and to write the report.
+- A decision the user must make (whether to delete, whether to force) goes at
+  the same end, not in the middle. Whether to merge a green pull request is
+  not one: see "Merge when it is green".
+- If you pushed and then found one more edit, fold it into the next closing
+  batch. Do not push after every edit.
+
+Skip this ordering for a task with no outward step, and when the user asks
+for a push now.
+
+### Every outward step asks
+
+The hook never lets a command run without a prompt. It refuses a chain, and
+of Claude Code it asks about a push that is not written plainly
+(a colon as in `git push origin a:b`, an option that forces or deletes, a
+quote, a variable), whatever rule allows a push. It says nothing else,
+so each push, each pull request step and each merge asks a person, under the
+host's own rules. Do not add an `allow` rule for one to
+`.claude/settings.json`, and do not change the hook under
+`tools/agent-workflow/`, unless the user asks: that is the user's decision,
+not a step of the work.
+
+A session often does not stand in the worktree when it runs an outward step.
+Name the place in the command: `git -C <worktree> push`, and
+`--repo <owner>/<name>` for `gh`. `cd <worktree> && git push` is a chain,
+and the hook refuses it.
+
+Give a title or a body as one quoted word, with the new lines inside the
+quotes, so that the prompt shows the whole text as it will be sent:
+
+```bash
+gh pr create --head worktree-price-list --title 'Add the price list' --body '## Summary
+
+- Stale prices are greyed out
+- The total no longer counts a row twice'
+```
+
+Never use `--admin`, `--force` or `--delete` unless the user asked for
+exactly that. Never merge a pull request you did not open in this session
+unless the user named it.
+
+### Start every change in a worktree
+
+Run `pnpm worktree <name> --ready` before the first edit. It fetches and cuts
+the branch from `origin`'s main by name, so the work does not start from a
+stale local branch. `--ready` installs and runs `pnpm gate:fast` there; hand
+a worktree to another agent only when the last line says `READY`. Skip the
+worktree for a question that changes no file.
+
+Look at main first, with `gh run list --branch main --limit 5`. If its
+latest runs are red, say so before the first edit: see "After the merge,
+watch main".
+
+Several sessions can work on one project at the same time this way: each has
+its own folder and its own branch, and none edits the project's own checkout.
+
+- **Never edit or commit in the project's own checkout**, however small the
+  change. Another session may be reading it, and main takes changes only
+  through a pull request. Files someone left uncommitted there stay as they
+  are.
+- **Never make the worktree by hand** with `git worktree add -b`. That cuts
+  the branch from where the checkout stands, and a local main is behind
+  `origin` whenever another session has merged since the last fetch.
+- **Several changes in one session get a worktree each**, and each its own
+  pull request. Do the local work of all of them first, then their outward
+  steps.
+
+In the commands below, `main` stands for the branch `origin/HEAD` points at.
+
+### One pull request for what is reviewed together
+
+Put in one pull request what a reviewer would accept or reject together: the
+change, its tests, the document it makes wrong, the entry it closes. Open a
+second one only when a reviewer could accept one part and reject the other,
+or when one part is wrong until the other is on main. "After this one lands"
+is not a reason by itself: each split costs a run of the checks and a merge.
+
+### Wait for green on your commit
+
+After the push and `gh pr create`, wait for the checks of the commit you
+pushed, not for any green run:
+
+```bash
+git rev-parse HEAD        # the commit to match
+gh run list --commit <commit> --json workflowName,status,conclusion,headSha
+```
+
+The pull request is green when every run for that commit is `completed` with
+`success`. Ask by the commit, not by the branch: a scan can run for the same
+commit under the pull request's own ref, and the branch's list does not show
+it. `gh pr checks <number> --watch` waits for them. Read the list afterwards
+all the same: a run of an earlier push can still be shown as the latest.
+
+- **A run failed:** read it with `gh run view <id> --log-failed`, fix it in
+  the worktree, commit, push, and wait again. Never merge past a red check,
+  and never weaken a check to pass it.
+- **No run appears:** ask `gh pr view <number> --json mergeable`. A pull
+  request that conflicts with main gets no run, however long you wait. Run
+  `git merge origin/main` in the worktree, resolve, push.
+- **A run takes twice its usual time:** stop waiting and look, with
+  `gh run view <id> --json jobs`. A step that hangs before the project's own
+  commands start (the checkout, a cache, the install) is the runner: start it
+  again with `gh run rerun <id> --failed`. A second hang at the same step is
+  an outage: say so and stop.
+- **A check fails for a reason the diff cannot have caused** (a repository
+  setting that is off, a service that is down): say what it is. Do not change
+  the workflow to get past it.
+
+### Read what landed on main before the merge
+
+Green proves the branch against the main it was cut from. Others merge while
+you work, so compare the two sides first:
+
+```bash
+git fetch origin
+git diff --name-only HEAD...origin/main     # what landed since the branch was cut
+git diff --name-only origin/main...HEAD     # what the branch changed
+```
+
+The question is one: can the two changes break each other? Git refuses a
+merge when the same lines changed, so what is left is the break git cannot
+see: a name one side renamed and the other still uses, a rule one side
+tightened, a fixture both rely on.
+
+- **Nothing landed, or what landed is plainly apart from your change**
+  (another package, documents while you changed code): merge as it is. Behind
+  is not the same as at risk.
+- **Both sides changed the same file, and it is prose** (a `.md` file a
+  person wrote): merge as it is. Git still stops on the same lines. Not prose
+  in this sense: a generated or checked document, a renamed heading that
+  something links to, and any settings file.
+- **What landed touches code you touched, or a file every package depends
+  on** (the lockfile above all; a config, a lint rule, a workflow, a fixture,
+  an exported name): run `git merge origin/main` in the worktree, push, and
+  wait for green again.
+- **What landed is too much to judge quickly:** do the same. Do not spend
+  longer on judging than a run of the checks takes.
+
+Do not bring main in every time it moves. Each time costs a run of the
+checks, and on a busy project main moves again before that run ends.
+
+Bring main in with a merge. Never rebase a pushed branch: that needs a forced
+push, and the runs of the checks are lost with the old commits.
+
+When git stops on a conflict, resolve only what conflicts. If the other side
+changed the body of something you renamed, read the merged body against the
+name before you commit: no check sees a name that no longer says what the
+code does.
+
+### Merge when it is green
+
+Merge a green pull request you opened in this session at once. Do not ask
+whether to merge it, and do not wait to be told: the host's prompt for the
+command is where a person says no.
+
+```bash
+gh pr merge <number> --merge
+```
+
+Always `--merge`. A squash or a rebase puts other commits on main than the
+ones the checks ran on, and the next step could not find yours there. Never
+`--auto`: read the checks yourself, then merge.
+
+Skip the merge when the user asked for a pull request only, or said that a
+person reviews it first. Say then that it is open and green.
+
+### Clean up when the commit is on main
+
+From the project's own folder, not from inside the worktree:
+
+```bash
+git fetch --prune origin
+git merge-base --is-ancestor <commit> origin/main    # exit 0: it is on main
+git worktree remove ../<project>-worktrees/<name>
+git branch -D worktree-<name>
+git merge --ff-only origin/main                      # see below
+```
+
+Remove the worktree only after the second line exits 0. Removing it deletes
+every file in it, the ones git ignores too: notes or reports to keep are
+committed, or written outside the worktree, before this. Remove only the
+worktree you made: another one belongs to another session. For those that
+others left, `pnpm worktree:audit` says which are finished; it removes
+nothing, and nor do you without a yes. A merged pull
+request whose worktree is still on disk is not finished.
+
+If the branch is still on `origin` after the merge, say so and leave it:
+removing it is `git push --delete`, which is the user's to ask for.
+
+The last line brings the project's own checkout up to main. It is not an edit
+of that checkout: it moves main to what `origin` has, and refuses to do
+anything else. A session reads this file and starts the hooks from that
+checkout, so one left behind works by the rules of an earlier day. Run it
+only when the checkout stands on main with nothing uncommitted; otherwise
+leave it and say so.
+
+### After the merge, watch main
+
+Some workflows run only on main, after the merge: a slow visual or end-to-end
+tier, a published report, a scan. The work is not done until they are.
+`gh pr view <number> --json mergeCommit` gives the commit to ask about:
+
+```bash
+gh run list --branch main --commit <merge commit> --json workflowName,status,conclusion
+```
+
+Wait until each run for that commit is `completed`. A run can take a minute
+to be listed, so list again before you call the list whole. Not every
+workflow runs for every commit: one with a `paths` filter runs only when
+those files changed.
+
+- **One fails because of your change:** fix it forward at once, without
+  being asked: a new worktree, a new pull request, the same steps. Say in the
+  report what broke and what fixed it.
+- **One fails for another reason** (it was red before the merge, a setting,
+  an outage): say which, and why it is not the change.
+
+Never report the work as done while a run for the merge commit is in
+progress.
+
+A red main comes before any other work, yours or not: every session cuts its
+next branch from it. If it was red before your merge, say so before you
+start, and do not add a change to it that is not its fix.
+
+### Stop when you are about to
+
+- edit a file while the session stands in the project's own checkout;
+- make a worktree with anything but `pnpm worktree`;
+- put off a test, a document or an entry to "a follow-up pull request" that
+  nothing forces to be separate;
+- merge without a `completed`, `success` run for the commit you pushed;
+- merge without having read what landed on main since the branch was cut;
+- bring main in "to be safe" when what landed is plainly apart;
+- type `gh pr merge` with `--squash`, `--rebase`, `--auto` or `--admin`;
+- wait on a run past twice its usual time without having looked at its jobs;
+- say "done" with the worktree still on disk, or a run on main in progress.
+
+### What is left
+
+`docs/STATUS.md` is the one answer to "what is still to do?". It holds only
+what is not done: an entry is removed when its work is on main, and the page
+shrinks. `docs/IDEAS.md` comes before it: what nobody has committed to.
+
+A piece of work ends with something left more often than not: a follow-up
+nobody asked for, a step only a person can take, a decision that is the
+user's, a thing that was not verified. The closing report is not the place
+that keeps it: the report is gone when the session ends, and another session
+never saw it. Write each one into `docs/STATUS.md`, in the pull request of
+the work that left it.
+
+| Section | What goes in it |
+|---|---|
+| In progress | Work that has started and is not finished |
+| Designed, not built | A plan or a design is on main, and nothing of it is built |
+| Planned, and held by something | It waits on a release, a decision or other work. Say on what |
+| Next, with no plan yet | The next step is known, and nobody has written a plan |
+| Waiting on a person | A step or a decision an agent cannot take. Say who, and give the command or the question |
+| Known limits | What will not be fixed soon: a thing not verified, a case not covered |
+
+One bullet for each: the name in bold, what is left, and a link to its plan
+when it has one. Link only a file that is on main.
+Every edit sets the "Last updated" line to today. `pnpm check:status`, in
+`gate:fast`, fails a page that leaves one of the six sections out, adds one,
+or writes an entry without its bold name, and one changed since the last
+commit with an old date.
+
+- **Work is planned, or something is left over:** add its entry.
+- **Its pull request merges:** remove the entry, in that pull request. There
+  is no section for what is done.
+- **Its state changes:** move it, and say what is left now.
+- **Someone asks what is pending:** read the page. Where it differs from the
+  project, correct it as part of the answer.
+- **An idea with no plan:** `docs/IDEAS.md`, not this page. When it gets a
+  plan, move it. Never keep it in both.
+
+Every edit sets `Last updated` to today's date.
+
+Skip the page for work that leaves nothing: say so in the report, and add no
+entry to say so. Do not keep what is left in the host's own memory in place
+of this page. A memory belongs to one person on one machine, and the page is
+the project's.
+
+### The changelog
+
+`CHANGELOG.md` has one entry per ISO week. The `Weekly tag` workflow tags
+each finished week and opens an issue that asks for its entry. To write one,
+follow `.claude/commands/workflow/changelog.md` (`/workflow:changelog` in
+Claude Code, the `workflow-changelog` skill in Codex). What the entry says is
+your judgement; that it cites every merged pull request is checked by
+`pnpm changelog check <week>`. Never create or move a week's tag by hand.
+
+### The other runbooks
+
+Each is a command in Claude Code (`/workflow:status`) and a skill of the same
+name in Codex (`workflow-status`). The steps are in the file, and it runs
+nothing by itself.
+
+- `.claude/commands/workflow/status.md`: where the project stands. This
+  checkout, the open pull requests, the last runs on main, and the headings
+  of `docs/STATUS.md`. It reads and changes nothing.
+- `.claude/commands/workflow/docs.md`: write what a session worked out into
+  the project's documents. It says where each kind of finding goes, and stops
+  for a yes before it writes.
+- `.claude/commands/workflow/worktrees.md`: which worktrees are finished and
+  which hold work someone stopped in the middle of, from
+  `pnpm worktree:audit`. Nothing is removed before the user says yes to a
+  list that names what goes.
+
+Three more stop at their first step when the add-on they need is not in the
+project:
+`.claude/commands/workflow/coverage-backfill.md` (needs `coverage`),
+`.claude/commands/workflow/visual-tolerance-audit.md` (needs `visual`) and
+`.claude/commands/workflow/perf-audit.md` (needs `performance`).
+<!-- /add-on: agent-workflow -->
+
+<!-- add-on: ci-security -->
+## CI security
+
+Three workflows check the supply chain on GitHub: `CI security` (workflow lint
+and `pnpm audit --prod`), `Dependency Review` and `Scorecard`. They need the
+network, so none of them is in `pnpm gate:full`. `pnpm check:dockerfiles`
+needs none and is in `gate:fast`. This section is what they cannot decide.
+
+```bash
+pnpm lint:workflows              # actionlint (valid?) then zizmor (safe?)
+pnpm lint:workflows zizmor       # one of them
+pnpm check:dockerfiles           # images by digest, no root, no package outside a lockfile
+pnpm repo:settings               # which repository settings on GitHub are off; it only reads
+```
+
+Exit 0 is a pass. Exit 1 is a finding, named in the linter's output above the
+`FAIL` line. Exit 2 with a `SKIP` line means the lint did not run here (no
+network on the first run, no build for this machine, a wrong checksum). Report
+a `SKIP` as "not run". Never report it as a pass, and do not retry in a loop: a
+sandbox with no network will not get one.
+
+### The repository's settings
+
+`pnpm repo:settings` asks GitHub which of the settings these checks depend on
+are on. Run it after the project's first push to GitHub, and when a check
+fails for a reason the diff cannot have caused, such as Dependency Review
+saying the dependency graph is off. Skip it otherwise. It only reads.
+Switching a setting on is a person's step: show the user the `fix:` command
+it prints, and do not run it. Report a `SKIP` line as "not read", never as on
+or as off.
+
+### When you add or change a workflow
+
+Run `pnpm lint:workflows` before you commit. Skip it only when no file under
+`.github/` changed. In a new workflow:
+
+- Pin every action by its full commit hash, with the version in a comment
+  after it. Take the hash from the action's release, not from memory.
+- Give the workflow `permissions: contents: read`. Grant a write on the one job
+  that needs it, with a comment that says why.
+- Write `persist-credentials: false` on every checkout, unless that job pushes.
+- Put no `${{ … }}` expression in a `run:` line. Pass the value through `env:`
+  and quote the variable.
+- Do not use `pull_request_target` or `workflow_run`. If the task seems to need
+  one, stop and ask the user.
+
+Do not silence a finding with `# zizmor: ignore[…]`, a `zizmor.yml` or an
+`actionlint.yaml` to turn the run green. Fix the workflow. If you believe a
+finding is wrong, say so and leave it red.
+
+### When Dependency Review fails a pull request
+
+Its job summary names the package and the advisory or licence.
+
+- **An advisory:** move to the patched version it names. If the package came
+  in through another one, update that one, or add a pnpm `overrides` entry
+  that lifts only the vulnerable package, with a comment that names the
+  advisory.
+- **No patched version exists:** do not add the dependency. If it is already
+  on main, tell the user; they decide whether to accept it.
+- **A refused licence** (GPL, AGPL, SSPL): do not add the package. Find
+  another. A package offered under two licences, one of them permissive, is
+  the user's decision, not yours.
+
+Never loosen `fail-on-severity`, `fail-on-scopes` or `deny-licenses` to pass.
+
+### When `pnpm audit --prod` fails
+
+The same steps as an advisory above. The weekly run can fail with no change in
+the project: an advisory was published for a version already in the lockfile.
+
+### When you add or change a Dockerfile
+
+Run `pnpm check:dockerfiles`. Skip this when no Dockerfile changed.
+
+- Take a digest from the registry
+  (`docker buildx imagetools inspect <image>:<tag>`), never from memory, and
+  keep the tag in front of it for the reader. The same for an image in
+  `COPY --from=` and in `RUN --mount=…,from=`.
+- Write the image and the user out. A variable in either fails, whatever its
+  default: `FROM ${BASE}`, `USER ${APP_USER}`.
+- End the last stage with `USER` and a plain name or number that is not root.
+- Write a heredoc as `<<EOF` on a line with no quotes, and put the script in
+  its body.
+- "Nothing else in this file was judged" means the check could not read the
+  file as Docker does. Fix that line first, then run it again: the other
+  findings come after.
+
+Do not get past a finding by another spelling, by moving the Dockerfile, or
+by a `--build-arg` or `--target` on the command line. If you believe a finding
+is wrong, say so and leave it red.
+
+### The update bot
+
+The project has one update bot, Dependabot or Renovate, and its config is the
+one file for it in `.github/`. Never add a config for the other by hand: two
+bots open the same pull requests twice. To
+move from one to the other, tell the user; it is one command in the
+repository the add-on came from, and Renovate needs its GitHub App installed
+by a person. Do not shorten the release age in either file to get an update
+sooner.
+
+### `SECURITY.md`
+
+It is the project's own text. Change it only when the user asks, and keep
+its promises (the answer time, the disclosure time) ones the user chose.
+
+### Moving a linter to a newer release
+
+`tools/ci-security/lib/pins.mts` holds the version, four URLs and four
+checksums of each linter, and its first lines give the command that prints the
+checksums. Change all of them together. If a download is refused for a wrong
+checksum, never copy the new checksum into the file to make it pass: tell the
+user.
+<!-- /add-on: ci-security -->
+
+<!-- add-on: coverage -->
+## Coverage
+
+`pnpm coverage` holds every file of every package to the bar: 95% of lines,
+statements and functions, 85% of branches. It runs in `pnpm gate:full`. A file
+is measured with its own package's tests only, so a file that only another
+package's tests run reads 0%. The gate decides pass or fail; this section is
+what it cannot decide.
+
+### Closing a gap
+
+1. Run `pnpm coverage:gaps`. It measures afresh and ranks the files with the
+   most lines no test reaches, across all packages.
+2. Start from the top. Read the file and say what is uncovered: a branch, an
+   error path, a whole module. Take first the code whose failure nobody would
+   notice, such as the choice of adapter in a composition root.
+3. Write the test through the public interface: the port, the presenter, the
+   page object. Do not export an internal function to reach a line, and do not
+   write a test that runs a line and asserts nothing.
+4. Prove the test can fail. Put the mutant a wrong implementation would contain
+   (`<` for `>`, a dropped guard) in a JSON spec and run
+   `pnpm mutation-check mutants.json`; the format is at the top of
+   `tools/coverage/mutation-check.mts`. `SURVIVED` means the test cannot see
+   that mistake: strengthen the test. `NO TESTS` means the row's command ran
+   no test, usually a `-t` filter that matches no title (vitest cuts an
+   `it.each` title at 40 characters): fix the command. Skip this only for a test that already
+   failed in front of you before the code existed.
+5. Run `pnpm coverage` again.
+
+### When not to chase the number
+
+- **A file no test can reach** (generated code, an entry point that starts the
+  app when it is imported): list it under `exclude` in
+  `tools/coverage.config.mts`, written from the project root, with the reason.
+  Create that file if it is not there; `tools/coverage/lib/config.mts` shows
+  its shape and belongs to the add-on, so do not edit it.
+- **A line only a real browser or a real network reaches**: mark it
+  `/* v8 ignore next -- <why no test can reach it> */`. The gate fails a
+  comment without the reason.
+- **Test code** (page objects, contract tests, `testing/` harnesses) and files
+  with nothing to run (types, re-exports) are already left out. They need no
+  test.
+- A missing test is never a reason. Do not lower a threshold, exclude a file or
+  ignore a line to turn the gate green. If the bar looks wrong for a file, say
+  so and leave the gate red.
+
+### Reading the published report
+
+The report on GitHub Pages shows the commit that built it, not the newest one.
+Its first line states that commit and the date, and `summary.json` beside it
+holds the same. Compare the commit with the code you are reading before you
+quote a number from it. For a decision, run `pnpm coverage:gaps`: it is never
+stale.
+<!-- /add-on: coverage -->
+
+<!-- add-on: e2e -->
+## End-to-end tests
+
+`packages/e2e` drives the built client in a real browser, with Playwright. It
+runs in two modes, and a mode's specs are in the folder of its name:
+
+| Mode | What runs | Specs |
+|---|---|---|
+| `sim` | The client alone, on its in-browser simulator | `packages/e2e/src/sim` |
+| `fullstack` | The client against the real server | `packages/e2e/src/fullstack` |
+
+```bash
+pnpm e2e                              # build, serve, run every spec in both modes, stop everything
+pnpm e2e --mode sim                   # one mode: only what it needs is built and started
+pnpm e2e --where host                 # the modes that say host: true; --where container, the others
+pnpm e2e src/sim/selection.spec.ts    # one spec
+pnpm e2e -g "marks the row"           # the tests whose title matches
+pnpm e2e --mode sim --headed          # a visible browser; --ui opens Playwright's own runner
+pnpm e2e:install                      # once on a machine: downloads the browser
+```
+
+`pnpm e2e` is not part of `gate:full`: it needs a browser and a port. Run it
+yourself after a change that can reach the screen through more than one layer
+(the composition root, an adapter, the server, a build setting). Skip it for a
+change one layer's own tests cover, and for docs and tooling. In CI it is the
+`End-to-end` workflow.
+
+Exit code 2 means the run could not start, not that the code is wrong. Where a
+port cannot be opened (a sandbox), say that the specs were not run where you
+are. Where the browser is missing, run `pnpm e2e:install`.
+
+### Is it an end-to-end test?
+
+Most behaviour has a cheaper and sharper home. An end-to-end spec waits in
+real time and sees only the screen, so write one only for what nothing else
+can show.
+
+| What you want to prove | Where it goes |
+|---|---|
+| A rule of the application: order, movement, when a row goes stale | A presenter, use case or machine test, on fake timers |
+| How a component draws a given state | The component's test, through its page object |
+| The client and the server agree on a message | `packages/integration` |
+| How it looks | The visual goldens, if the project has them |
+| The built app wires the feature at all; a mode picks the right adapter; a journey across screens | An end-to-end spec |
+
+One or two specs for a feature, on its main path. If a spec needs a state that
+takes time or luck to reach (a stale row, one symbol among several), the rule
+belongs in a test that controls time.
+
+### How a spec is written
+
+Copy `packages/e2e/src/sim/selection.spec.ts`.
+
+- A spec imports `test` and `expect` from `#/testing/test.ts`, takes page
+  objects as fixtures, and asserts on what they return. It never holds the
+  browser: the lint fails on `page`, a locator or a selector in a spec.
+- A page object is `packages/e2e/src/pages/<Name>.page.ts`: an interface in
+  the words of a user, and a function that builds it from Playwright's
+  `Page`. Add it to the fixtures in `packages/e2e/src/testing/test.ts`.
+- A page object finds an element by a test id from
+  `packages/client-react/src/ui/testids.ts`, or by its role. Add the id to the
+  client first. It reads what it reports in one step, so the page cannot
+  change between two reads.
+- The package imports nothing else of the application. Use `import type` for
+  a type of the wire protocol.
+
+### Waiting
+
+- Wait for a state, never for time. `await expect.poll(priceList.rows)` asks
+  again until it holds; `await expect(async () => { … }).toPass()` does the
+  same for two things that must agree.
+- Read a value to compare with only after waiting for the state it depends on.
+- When the state depends on chance, work out the odds and write them beside
+  the timeout, as `packages/e2e/src/sim/priceList.spec.ts` does. Better: assert
+  something that does not depend on chance.
+- Do not add a retry, and do not raise a timeout to make a spec pass. A spec
+  that fails now and then waits on the wrong thing.
+
+### A mode, and what it starts
+
+`tools/e2e.config.mts` is the project's. It says how the client is built and
+served and what each mode starts. Add a mode there, with a folder of its name
+under `packages/e2e/src`. A spec outside every mode's folder stops the run, and
+so does a mode with no spec.
+
+- Write a command as the program and its arguments, never `pnpm …`: the
+  wrapper can die on the stop signal and leave the server running.
+- Write no port. A program prints its address and the `ready` pattern reads it.
+- A server that answers a second protocol on its port still prints one
+  address. Write each of the client's variables around `SERVER_HOST`, its
+  host and port (`http://${SERVER_HOST}/api`), and give a new page object
+  the `serverHost` option to tell that server's responses from any other.
+- To prove a mode uses the server, compare the screen with what came over the
+  wire (`serverFeed`). The simulator makes prices that look the same.
+- A mode that needs Docker (a local database) says `host: true`: the
+  container's job cannot start it, and a job on the runner does. Read its
+  keys with an `env` function that asks the running stack (its status
+  command), never write them in the config.
+
+### When a spec fails
+
+1. Read the output in full. Do not pipe it through `tail`, `head` or `grep`.
+2. Open the report: `pnpm --dir packages/e2e exec playwright show-report reports/html`.
+   Each failure has a trace: every step, the page at that step, the network
+   and the console.
+3. Decide which it is. **The application is wrong:** fix it, and ask whether a
+   cheaper test should have caught it. **The spec waits on time or chance:**
+   make it wait on a state. If you cannot tell, stop and ask.
+
+### Traps
+
+- **`playwright test` run by hand fails with "the run is started with
+  `pnpm e2e`".** The Playwright config starts no server. Use `pnpm e2e`.
+- **Upgrading Playwright.** Change the version in `packages/e2e/package.json`
+  and the image tag in `.github/workflows/e2e.yml` together; the
+  `playwright-pin` gate fails otherwise. Every package that uses Playwright
+  takes the same version.
+<!-- /add-on: e2e -->
+
+<!-- add-on: format-lint -->
+## Formatting and lint (Biome)
+
+`pnpm biome:check` (part of `gate:fast`) fails a file that is not formatted, an
+import list that is out of order, and a lint finding, warnings included. It
+changes nothing. What it cannot decide is below.
+
+**When to run the fixer.** Run `pnpm fix` after you finish editing and before
+you run the gate. Do not lay code out by hand, and do not sort imports by
+hand. Skip it when you changed no source, JSON or CSS file.
+
+`pnpm fix` runs Biome's fixer and `eslint --fix` in turn until neither
+changes a file. Run that one command, not the two by hand: each can make
+work for the other (Biome rewraps a line, and ESLint then wants a blank line
+beside it), so one pass of each is not always enough. `pnpm biome:fix` is
+Biome alone.
+
+- **It prints `FAIL fix — … still has findings no fixer repairs`.** The files
+  are settled; what is listed is yours to fix in the code.
+- **It prints `FAIL fix — not settled`.** The two fixers undo each other on
+  the files it names. Do not run it again. That is a conflict between
+  `biome.json` and the ESLint config: say so, with the file, and ask.
+
+**An import for its effect is sorted too.** `import "./index.css"` goes
+where the fixer puts it, after the code's imports. Do not write CSS that
+depends on which of two imported stylesheets loads first. If one must follow
+another, `@import` it from that one.
+
+**What the fixer leaves to you.** It applies only the fixes Biome calls safe.
+A finding it prints and does not fix is yours to fix in the code: add the
+braces, write the type, narrow the value. Do not pass `--unsafe` over the
+whole project; an unsafe fix can change what the code does.
+
+**When a rule seems wrong.** Decide which of these it is:
+
+- The code can say the same thing in a way the rule accepts. Do that. For a
+  `!` assertion, check the value and throw with a message that says what was
+  missing.
+- The rule does not fit one kind of file (a framework needs a default export
+  there, say). Add an `overrides` entry for those files to `biome.json` at
+  the root, and write the reason in the commit message.
+- The rule does not fit this project at all. Say so and ask before you turn it
+  off in `biome.json`.
+- One line is a true exception. Only then write
+  `// biome-ignore lint/<group>/<rule>: <reason>` on the line above. The
+  reason says why this line is different, not what the rule is. Never write
+  one without a reason, and never to get a gate to pass.
+
+Do not edit `tools/format-lint/biome.base.json`: an update of the add-on
+replaces it. The project's own rules go in `biome.json`, which extends it.
+
+Biome does not read `tools/`. It does not replace `pnpm lint` (ESLint, the
+architecture rules); both run.
+<!-- /add-on: format-lint -->
+
+<!-- add-on: performance -->
+## Rendering performance
+
+This UI animates over live data, so main-thread work in one frame is repeated
+in every frame. `pnpm perf:check` (part of `gate:fast`) fails what the source
+settles. The rest is judgement, and it is yours.
+
+**Before you write or review a CSS animation, a transition or an
+`element.animate()` call, read `docs/performance.md`.**
+
+Choosing a fix (each is a section of the guide, with code):
+
+- It changes a size or a position: scale or translate with `transform`, timed
+  once at mount ("Progress bars").
+- It changes a colour, a shadow or a fill: put the final look on an overlay
+  and fade the overlay's `opacity` ("Colour, glow and fill").
+- It needs an entry animation and a loop: one per element, the second on a
+  wrapper or a pseudo-element ("One animation per property per element").
+- It moves part of an SVG, a pattern, or a blurred layer: see the pattern for
+  that case. Do not invent a fourth way.
+
+Run `pnpm perf:motion-audit` when:
+
+- you added or changed an animation that live data can trigger;
+- `perf:check` printed "Not judged" for your code;
+- you changed how often something ticks, flashes or re-renders.
+
+Read its report, not only its exit code: "started N times" on a flash, or a
+transition you did not write, is motion that looks idle and is not. It needs
+Chromium (`pnpm exec playwright install chromium`) and opens only the paths it
+is given, so a view behind a click is yours to check by hand.
+
+When these rules do not apply: an animation that live data cannot trigger. A
+hover transition on a button, or a dialog that fades in when the user opens
+it, runs rarely and briefly. Do not rewrite it. Accept it in
+`tools/perf/allowed.mts` with the reason. Ask first how often its trigger
+fires on real data: "on an event" is not a reason if the event is a tick.
+
+Do not add an allow-list entry to get past a finding on steady-state motion,
+and do not weaken a check. If a finding looks wrong, say so.
+<!-- /add-on: performance -->
+
+<!-- add-on: repo-hygiene -->
+## Repo hygiene
+
+Three checks run in `gate:fast`: `pnpm check:versions`, `pnpm check:doc-links`
+and `pnpm lint:css`. Each fails with the file and what to change. What they
+cannot decide is below.
+
+**Versions.** When you add a dependency a second package already has, copy
+that package's range. When the check fails, change the ranges to agree; do not
+add a version group to get past it. A version group in
+`tools/repo-hygiene/syncpack.json` is for a difference the project wants (two
+majors during a migration), and its `label` says why and until when. Skip
+this when the project has one package.
+
+**Links.** When you rename a heading, move a file or delete a document, run
+`pnpm check:doc-links` before you commit, and repair each link it names:
+point it at the new place. Remove a link only when what it pointed to is gone
+for good. Do not work out an anchor in your head. GitHub drops punctuation and
+keeps the spaces around it, so `## A -- B` is `#a----b`; the check prints the
+anchor the file really has. It does not follow `https:` links, and it does not
+read `tools/`. Those are yours to check by reading. Skip this for a change
+that touches no markdown.
+
+**CSS.** Fix what stylelint reports. A colour is written once, as a custom
+property where the project's other tokens are (`:root` in the client's
+`src/index.css`), and used as `var(--name)`. Before you add a token, look for
+one that already means the same thing, and name a new one for what it means
+(`--color-up`), not for how it looks (`--green`). A class is camelCase in a
+`*.module.css` file and kebab-case in any other stylesheet. Turn a rule off
+in `tools/repo-hygiene/stylelint.json` only when the project as a whole does
+not want it, never for one file that breaks it, and say why in the commit
+message. Do not edit `stylelint.base.json`: an update of the add-on replaces
+it. A `stylelint-disable` comment needs ` -- ` and the reason after the rule's
+name; use one only for a line that is a true exception. Skip this for a
+change that touches no `.css` file.
+
+Do not weaken a check to make it pass. If a finding looks wrong, say so.
+<!-- /add-on: repo-hygiene -->
+
+<!-- add-on: strict-lint -->
+## Strict lint (types and dead code)
+
+Two checks run in `gate:fast`. `pnpm lint:types` runs the ESLint rules that
+need types. `pnpm lint:dead` runs knip: unused files, exports and
+dependencies. Each names the file. What they cannot decide is below.
+
+**A promise nothing waits for.** Choose one, in this order:
+
+- `await` it, when the code after it needs the work to be done or must see it
+  fail.
+- `return` it, when the caller is the one who should wait.
+- Mark it `void`, when nothing may wait (an event handler, a fire-and-forget
+  log). Then the promise must handle its own failure (`.catch`), and a comment
+  on the line above says why nothing waits. Never write `void` to get the
+  gate to pass.
+
+**An `async` function where a plain callback is expected** (`forEach`, an
+event handler, a subscriber). Do not make the callback `async`. Use a
+`for…of` loop with `await`, or call a named function and treat its promise as
+above.
+
+**A `switch` that misses a case.** Add the case. Add a `default` branch only
+when the rest really are handled the same way; a `default` that hides a new
+member is the bug this rule exists to stop.
+
+**"No tsconfig.json includes this file."** The file is not typechecked
+either. Add it to the `include` of its package's `tsconfig.json`. Do not move
+it under `tools/` to hide it.
+
+**knip calls something unused.** First check that it is: search for the name.
+
+- It is unused. Remove it: the file, the `export` keyword, the line in an
+  `index.ts`, the line in `package.json`. Do not keep an export for a caller
+  that does not exist yet; add it with the caller.
+- Only a test uses it. That counts as used, and knip does not report it. If it
+  is reported, the test does not import it.
+- It is used in a way knip cannot follow: a file a tool loads by name, a
+  program started from a string, a page a config serves. Name the file as an
+  `entry` in `tools/strict-lint/knip.jsonc`, or the dependency in
+  `ignoreDependencies`, with a comment that says who uses it.
+
+Never turn a kind of finding off, and never add a file to `ignore`, to get
+past one finding.
+
+A new package needs nothing: `packages/*` covers it. Skip all of this for a
+change that touches no TypeScript file and no `package.json`.
+
+Do not edit `tools/strict-lint/eslint.typed.base.mts`; an update replaces it.
+A rule the project adds or changes goes in `tools/strict-lint/eslint.config.mts`.
+<!-- /add-on: strict-lint -->
+
+<!-- add-on: visual -->
+## Visual goldens
+
+Each scenario in `packages/client-react/tests/visual/scenarios.ts` is rendered
+in a fixed state and compared with a committed image (a golden). A difference
+fails. Goldens are kept per system in `tests/visual/goldens/<platform>/`,
+because systems draw text differently. CI compares the `linux-x64` set.
+
+```bash
+pnpm visual          # compare every scenario with this system's goldens
+pnpm visual:update   # redraw this system's goldens
+pnpm visual:jitter   # measure how much the same commit differs from itself (--scenario <name> for one)
+pnpm visual:coverage # list the UI that no scenario renders
+pnpm visual:check    # in gate:fast: typecheck of the tier
+pnpm visual:check:server   # in gate:fast: no Playwright server is started through pnpm
+pnpm visual:check:styles   # in gate:fast: main.tsx imports no stylesheet or font besides index.css
+```
+
+`pnpm visual` is not part of `gate:full`: it needs a browser and goldens drawn
+on this system. Run it yourself after a change that can reach the screen (the
+UI, its CSS, a presenter). Skip it for the server, docs and tooling. In CI it
+is the `Visual goldens` workflow.
+
+### The pyramid
+
+Start with the small components: every state that matters, one scenario each.
+Then a reasonable number of sections, chosen for how parts fit together and
+not to cover combinations: the combinations of the parts' states grow
+multiplicatively, and each part's states are already pictured below. Then a
+few pages, the whole app at the sizes that matter. A set of only whole-app
+pictures is the shape to avoid. No gate counts pictures; the word is
+"reasonable". The job summary prints how many there are at each level.
+
+Where a new picture belongs:
+
+- a new state of one component: a component scenario (`level: "component"`,
+  `mount` naming its entry in `registry.tsx`);
+- a section only when the way parts sit together is what could break;
+- a page (no `mount`) only for a new screen or a new layout size.
+
+Run `pnpm visual:coverage` to find states no scenario shows yet: it lists the
+UI files with code no scenario renders, the most first, with the branches
+never taken and the functions never called. It is a report, not a gate.
+
+### Add a scenario
+
+Add an entry to `scenarios.ts`: a name, what is pictured and the state, as
+data. Start the name with what is pictured (`price-row-stale`). State goes in
+through the app harness or, for a component, as props from the scenario; never
+click to reach it, and never wait for time to pass. If the state cannot be
+expressed yet, add a field to `Scenario` and deliver it in `seeding.ts`. A new
+component gets an entry in `registry.tsx`. These files are the project's:
+`scenarios.ts`, `seeding.ts`, `registry.tsx`, `framing.ts`, `tolerance.ts`.
+Never edit `host/`, `visual.pw.ts` or `playwright.config.ts`: they are the
+add-on's, an update replaces them, and an edited file there makes every update
+refuse. Then run `pnpm visual:update`, open the new image, and check it shows
+what the name says. Commit the image with the scenario.
+
+In `seeding.ts`, state that must be there before the first render goes in
+`app` (data a port answers from memory, a machine that starts with a value,
+set through its own intent). State that arrives afterwards goes in `deliver`,
+and a wait there is `clock.tick(...)`. A scenario with a `mount` is shown
+through `render`. A project without a registry yet starts one from
+`tools/templates/visual.packages__client-react__tests__visual__registry.tsx.txt`.
+
+What is captured:
+
+- A component or section is a **root capture**: a fixed width (`width`, or
+  `rootWidth` in `framing.ts`), the content's height, a small padding.
+- A page is a **viewport capture**: the viewport at `width` and `height`
+  (1920x1080 from `framing.ts` by default), nothing added.
+- **A dialog is a component** mounted alone, with `capture: "viewport"` and a
+  `width` and `height` the size of the picture. Its fixed layer, scrim and `vh`
+  sizes are then drawn against the viewport, which is the picture. Do not
+  picture a dialog as a root capture. A dialog over the app is a page, used
+  sparingly.
+- The defaults are in `framing.ts`, the project's file. Change them there,
+  never in an add-on file.
+
+### When a comparison fails
+
+1. Read the failure in full. Do not pipe the output through `tail`, `head` or
+   `grep`: the cut can hide the failing line and leave a summary that reads as
+   a pass.
+2. Open `packages/client-react/tests/visual/reports/html/index.html`. Each
+   failure shows the golden, the new image and the difference.
+3. Decide which it is. **Not meant:** fix the code; leave the goldens alone.
+   **Meant:** run `pnpm visual:update`, check that only the scenarios you
+   expected changed (`git status`), and commit the images in the same commit as
+   the change. Then tell the user the `linux-x64` set also needs a redraw. The
+   `Update visual goldens` workflow uploads the images as an artifact and
+   commits nothing; its job summary gives the commands. You cannot draw that
+   set on another system.
+
+Never update goldens to make a failure go away before you have looked at the
+difference and can say why it is correct. If you cannot say why, stop and ask.
+
+### The tolerance
+
+`tolerance.ts` sets a small insurance budget for every scenario, chosen to stay
+below the smallest real regression the tier must catch: as shipped,
+`maxDiffPixels: 8` and `threshold: 0.01`, held by reference regressions as
+small as a 4x4 icon removed (16 pixels). Never raise it to make a failure pass.
+
+A scenario may set `strict`, a larger `maxDiffPixels` or a lower
+`pixelThreshold`. Each needs a `pnpm visual:jitter --scenario <name>`
+measurement of that scenario and the mechanism understood, both written in a
+comment at the scenario. Looser only for a measured, understood difference.
+Tighter (`strict`, a lower `pixelThreshold`) whenever the global could hide a
+change that matters there, such as a mark smaller than about 6x6 pixels.
+
+### Traps
+
+- **A font imported in `src/main.tsx`.** The host loads only `index.css`, so
+  every picture would be drawn in a fallback face and nothing would fail. Put
+  the import in `index.css`; `pnpm visual:check:styles` fails otherwise.
+- **A component pictured with no colours.** The app's theme providers and
+  attributes sit at its root, and a mounted component has none of them unless
+  `Surround` in `registry.tsx` gives them. Put the app's theme root there,
+  without its layout.
+- **A native control's own text** (a `<select>`) draws two ways across
+  `linux-x64` runs. Draw the shown value as ordinary text over the control, or
+  keep the control out of goldens.
+- **The goldens did not change after a change you meant.** The page came from a
+  stale server, or the change does not reach any scenario. The config refuses
+  to use a server it did not start; if the port is taken, find and stop the
+  holder (`lsof -iTCP:4319 -sTCP:LISTEN`), do not set `reuseExistingServer`.
+- **A scenario fails now and then.** Something on the page still moves. Find it
+  and pin it in the host (its clock, an animation, a late font), or tell the
+  user if it is in the browser. Do not add a wait, a retry or tolerance.
+- **A run prints its results and never ends.** A server was started through
+  pnpm and outlived it. Never write `pnpm exec`, `pnpm run` or `pnpm --filter`
+  in a `webServer.command`; start the program by its path
+  (`node_modules/.bin/vite`) with `cwd` set to the package.
+  `pnpm visual:check:server` fails on it.
+- **Upgrading Playwright.** Change the npm version and the image tag in every
+  workflow together (the `playwright-pin` gate fails otherwise), then redraw
+  every set: a new browser draws new pixels.
+- **A missing golden fails; it is never written by a plain run.** On another
+  system than the committed sets, `pnpm visual` fails until that system has a
+  set of its own. Say so; do not copy another system's images.
+<!-- /add-on: visual -->

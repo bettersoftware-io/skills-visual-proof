@@ -1,0 +1,19 @@
+{
+  "name": "@demo/integration",
+  "private": true,
+  "type": "module",
+  "imports": {
+    "#/*": "./src/*"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "test": "vitest run"
+  },
+  "devDependencies": {
+    "@demo/client-core": "workspace:*",
+    "@demo/domain": "workspace:*",
+    "@demo/server": "workspace:*",
+    "@demo/shared": "workspace:*",
+    "rxjs": "^7.8.2"
+  }
+}

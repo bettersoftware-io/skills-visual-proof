@@ -1,0 +1,82 @@
+# proof
+
+A TypeScript monorepo built on ports and adapters, with a streaming UI on RxJS
+and React, and the checks that keep it that way.
+
+## First
+
+```bash
+git init          # the agent's stop hook reads git to know what changed
+pnpm install
+pnpm fix
+pnpm gate:full    # everything CI runs
+```
+
+`pnpm gate:full` passes on the project as it was created. Run it before the
+first change, so a later failure is known to come from the change.
+
+## Every day
+
+```bash
+pnpm dev          # http://localhost:5173, on the in-browser simulator
+pnpm dev:fs       # the server and the client together
+pnpm gate:fast    # architecture gates, lint, typecheck
+pnpm gate:full    # gate:fast, then tests and the build: everything CI runs
+pnpm gate:full:quiet   # the same commands and verdict, printing only the stage that failed
+pnpm --filter @demo/domain test   # one package's tests
+```
+
+## What is in it
+
+Seven packages under `packages/`, each named `@demo/<folder>` and imported
+by that name:
+
+```ts
+import type { PricePort } from "@demo/domain";
+```
+
+They hold one small feature, a live price list, built the way every feature is
+meant to be built. It is an example to copy, not part of the product.
+[AGENTS.md](AGENTS.md) says where each kind of code goes and lists the file
+that shows each pattern.
+
+Packages export their TypeScript source. Nothing is compiled except the client,
+which Vite bundles; the server and the tooling are run by Node directly. This
+needs Node 26 or later.
+
+## The checks
+
+The architecture gates, the lint rules and the agent hooks live in
+`tools/arch`, and [its README](tools/arch/README.md) describes them. They are
+files in this project, so they apply to everyone who works on it and to CI.
+
+## Add-ons
+
+Added when the project was created:
+
+- `agent-workflow`: How an agent ships work: a hook that keeps each push and pull request step in a call of its own, a worktree script and an audit of worktrees, a page of what is left, a weekly tag and a changelog.
+- `ci-security`: Supply-chain checks for a project on GitHub: workflow lint (actionlint, zizmor), Dependency Review, pnpm audit, OpenSSF Scorecard, a Dockerfile check, a security policy, Renovate or Dependabot, and a command that names the repository settings that are off. Renovate opens the update pull requests and the security fixes. A person installs its GitHub App on the repository first.
+- `coverage`: A per-file coverage gate for every package, a ranked list of the gaps, a check that proves a test can fail, and a published coverage report.
+- `e2e`: End-to-end tests: Playwright drives the built client in a real browser, on the simulator and against the real server, through page objects.
+- `format-lint`: Biome as the formatter, the general linter and the import sorter, with one check in gate:fast.
+- `performance`: Rendering-performance checks for a UI that animates over live data: a static animation gate and a runtime motion audit.
+- `repo-hygiene`: Three small checks in gate:fast: one version of each dependency, no dead markdown link or anchor, and CSS lint.
+- `strict-lint`: Two checks in gate:fast: the ESLint rules that need types (a promise nobody waits for, a switch that misses a case), and knip for unused files, exports and dependencies.
+- `visual`: Visual golden tests: each UI scenario is rendered in a known state and compared with a committed screenshot.
+
+## By hand
+
+- **A newer pnpm.** `packageManager` in `package.json` names pnpm by its
+  version and by the hash of that release, which Corepack checks the download
+  against. To move to another version run
+  `node tools/arch/ci/pin-package-manager.mts pnpm@<version> --write`, then
+  `pnpm install`. Do not type the hash.
+- **What an add-on leaves to a person** is written at the top of the file it
+  gave the project to keep. Read that file once: a security policy has times
+  to make your own, and an update bot may need an app installed on the
+  repository before it does anything. Settings on GitHub that no file can
+  make are listed in that add-on's README, in the repository below.
+
+`tools/installed.json` records what is installed now. The kit and the add-ons
+come from <https://github.com/bettersoftware-io/skills>, which also holds the
+script that adds one or brings one up to date.
