@@ -1,0 +1,104 @@
+{
+  "commit": "14ac8c88b2cf79fc7403d484dbf0bc408a8bfda0",
+  "uncommittedChanges": false,
+  "ref": "main",
+  "builtAt": "2026-10-17T17:11:54.990Z",
+  "thresholds": {
+    "lines": 95,
+    "statements": 95,
+    "functions": 95,
+    "branches": 85
+  },
+  "exclude": {
+    "**/*.d.ts": "declarations hold no code",
+    "**/*.page.{ts,tsx}": "page objects are test code",
+    "**/__contracts__/**": "port contract tests are test code",
+    "**/__tests__/**": "test code",
+    "**/__testUtils__/**": "test code",
+    "**/testing/**": "test harnesses that other packages' tests import",
+    "packages/client-react/src/main.tsx": "the browser's entry point: it only calls startApp(), which is tested; importing it in a test would start the app",
+    "packages/server/src/index.ts": "the server's entry point: it only reads the port and calls startServer(), which is tested; importing it in a test would start a server"
+  },
+  "packages": [
+    {
+      "directory": "packages/client-core",
+      "verdict": "PASS",
+      "reason": "5 files at or above the bar",
+      "measuredFiles": 5,
+      "emptyFiles": 2,
+      "underTheBar": [],
+      "unexplainedIgnores": [],
+      "failedTests": []
+    },
+    {
+      "directory": "packages/client-react",
+      "verdict": "PASS",
+      "reason": "6 files at or above the bar",
+      "measuredFiles": 6,
+      "emptyFiles": 0,
+      "underTheBar": [],
+      "unexplainedIgnores": [],
+      "failedTests": []
+    },
+    {
+      "directory": "packages/domain",
+      "verdict": "PASS",
+      "reason": "2 files at or above the bar",
+      "measuredFiles": 2,
+      "emptyFiles": 3,
+      "underTheBar": [],
+      "unexplainedIgnores": [],
+      "failedTests": []
+    },
+    {
+      "directory": "packages/e2e",
+      "verdict": "SKIP",
+      "reason": "its tests are Playwright's (playwright.config.ts, and no test script): they drive the built application in a browser, in another process, so there is nothing here for this tool to run or to measure",
+      "measuredFiles": 0,
+      "emptyFiles": 0,
+      "underTheBar": [],
+      "unexplainedIgnores": [],
+      "failedTests": []
+    },
+    {
+      "directory": "packages/integration",
+      "verdict": "SKIP",
+      "reason": "no file to measure: none matches `include`, or every one is excluded",
+      "measuredFiles": 0,
+      "emptyFiles": 0,
+      "underTheBar": [],
+      "unexplainedIgnores": [],
+      "failedTests": []
+    },
+    {
+      "directory": "packages/react-bindings",
+      "verdict": "PASS",
+      "reason": "5 files at or above the bar",
+      "measuredFiles": 5,
+      "emptyFiles": 1,
+      "underTheBar": [],
+      "unexplainedIgnores": [],
+      "failedTests": []
+    },
+    {
+      "directory": "packages/server",
+      "verdict": "PASS",
+      "reason": "1 file at or above the bar",
+      "measuredFiles": 1,
+      "emptyFiles": 0,
+      "underTheBar": [],
+      "unexplainedIgnores": [],
+      "failedTests": []
+    },
+    {
+      "directory": "packages/shared",
+      "verdict": "PASS",
+      "reason": "1 file at or above the bar",
+      "measuredFiles": 1,
+      "emptyFiles": 1,
+      "underTheBar": [],
+      "unexplainedIgnores": [],
+      "failedTests": []
+    }
+  ]
+}
